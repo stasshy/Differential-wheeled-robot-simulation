@@ -12,44 +12,9 @@ def step_unicycle(q, v, w, dt):
     th_new = wrap_angle(th + w * dt)
     return np.array([x_new, y_new, th_new])
 
-def lidar_detect(q, landmarks, r_max=8.0, fov=np.deg2rad(180)):
-    x, y, th = q
-    dets = []
-    for i, (lx, ly) in enumerate(landmarks):
-        dx, dy = lx - x, ly - y
-        r = np.hypot(dx, dy)
-        if r > r_max:
-            continue
-        bearing = wrap_angle(np.arctan2(dy, dx) - th)
-        if abs(bearing) <= fov / 2:
-            dets.append(i)
-    return dets
-
-def simulate_robots(robots_init, N, dt, v_cmd, w_cmd, noisy=False, sigma_v=0.0, sigma_w=0.0, seed=7):
-    rng = np.random.default_rng(seed)
-    trajs = []
-    for q0 in robots_init:
-        q = q0.copy()
-        traj = np.zeros((N, 3))
-        for k in range(N):
-            if noisy:
-                v = v_cmd + rng.normal(0.0, sigma_v)
-                w = w_cmd + rng.normal(0.0, sigma_w)
-            else:
-                v = v_cmd
-                w = w_cmd
-            q = step_unicycle(q, v, w, dt)
-            traj[k] = q
-        trajs.append(traj)
-    return trajs
-
 def compute_bounds(trajs, landmarks=None, pad=1.0):
-    xs, ys = [], []
-    for tr in trajs:
-        xs.append(tr[:, 0])
-        ys.append(tr[:, 1])
-    xs = np.concatenate(xs)
-    ys = np.concatenate(ys)
+    xs = np.concatenate([tr[:, 0] for tr in trajs])
+    ys = np.concatenate([tr[:, 1] for tr in trajs])
 
     if landmarks is not None:
         xs = np.concatenate([xs, landmarks[:, 0]])
@@ -59,47 +24,173 @@ def compute_bounds(trajs, landmarks=None, pad=1.0):
     ymin, ymax = ys.min() - pad, ys.max() + pad
     return xmin, xmax, ymin, ymax
 
-dt = 0.05
-T = 40.0
-N = int(T / dt)
+def measure_range_bearing(q, landmark, noisy=False, sigma_r=0.0, sigma_b=0.0, rng=None):
+    if rng is None:
+        rng = np.random.default_rng(0)
 
-R = 3.0
-v_cmd = 0.6
-w_cmd = v_cmd / R
+    x, y, th = q
+    lx, ly = landmark
+    dx, dy = lx - x, ly - y
+    r_true = np.hypot(dx, dy)
+    b_true = wrap_angle(np.arctan2(dy, dx) - th)
 
-sigma_v = 0.25
-sigma_w = 0.2
+    if not noisy:
+        return np.array([r_true, b_true])
 
-robots_init = [
-    np.array([0.0, 0.0, 0.0]),
-    np.array([2.0, 1.0, np.deg2rad(30)]),
-    np.array([-1.5, 2.0, np.deg2rad(-60)]),
-]
+    r = r_true + rng.normal(0.0, sigma_r)
+    b = wrap_angle(b_true + rng.normal(0.0, sigma_b))
+    return np.array([r, b])
 
-landmarks = np.array([
-    [4.0, 4.0],
-    [6.0, 1.0],
-    [1.0, 6.5],
-    [-2.0, 5.0],
-    [-4.5, 1.5],
-    [-3.5, -2.5],
-    [2.5, -3.5],
-    [6.0, -2.0],
-])
+def rb_to_xy(q, r, b):
+    x, y, th = q
+    ang = th + b
+    return x + r * np.cos(ang), y + r * np.sin(ang)
 
-trajs_clean = simulate_robots(robots_init, N, dt, v_cmd, w_cmd, noisy=False)
-trajs_noisy = simulate_robots(robots_init, N, dt, v_cmd, w_cmd, noisy=True, sigma_v=sigma_v, sigma_w=sigma_w, seed=7)
+class EKF:
+    def __init__(self, Q_motion, R_meas, dt, mu0=None, Sigma0=None):
+        """
+        Q_motion: 3x3 (motion/process covariance added in prediction)
+        R_meas:   2x2 (measurement covariance for [range, bearing])
+        """
+        self.dt = dt
+        self.mu = np.zeros((3, 1)) if mu0 is None else mu0.reshape(3, 1).copy()
+        self.Sigma = 0.5 * np.eye(3) if Sigma0 is None else Sigma0.copy()
 
-def animate_motion(trajs, title, out_gif, landmarks=None, show_lidar=False,
-                   r_max=8.0, fov=np.deg2rad(180), fps=25):
+        # Naming like your EKF example:
+        self.R = Q_motion   # motion noise
+        self.Q = R_meas     # measurement noise
 
-    num_robots = len(trajs)
-    N_local = trajs[0].shape[0]
+    def motion_model(self, mu, u):
+        v, omega = u
+        x, y, theta = mu.flatten()
+        dt = self.dt
 
-    # Fixed robot colors
-    robot_colors = ["red", "blue", "green"]
+        x_new = x + v * np.cos(theta) * dt
+        y_new = y + v * np.sin(theta) * dt
+        theta_new = wrap_angle(theta + omega * dt)
+        return np.array([[x_new], [y_new], [theta_new]])
 
-    xmin, xmax, ymin, ymax = compute_bounds(trajs, landmarks=landmarks, pad=1.0)
+    def motion_jacobian(self, mu, u):
+        v, _ = u
+        _, _, theta = mu.flatten()
+        dt = self.dt
+        G = np.array([
+            [1.0, 0.0, -v * np.sin(theta) * dt],
+            [0.0, 1.0,  v * np.cos(theta) * dt],
+            [0.0, 0.0, 1.0]
+        ])
+        return G
+
+    def measurement_model(self, mu, landmark):
+        lx, ly = landmark
+        x, y, theta = mu.flatten()
+
+        dx = lx - x
+        dy = ly - y
+        r = np.sqrt(dx**2 + dy**2)
+        bearing = wrap_angle(np.arctan2(dy, dx) - theta)
+
+        return np.array([[r], [bearing]])
+
+    def measurement_jacobian(self, mu, landmark):
+        lx, ly = landmark
+        x, y, theta = mu.flatten()
+
+        dx = lx - x
+        dy = ly - y
+
+        q = dx**2 + dy**2
+        r = np.sqrt(q)
+
+        # safety (avoid divide-by-zero if robot hits landmark)
+        eps = 1e-9
+        r = max(r, eps)
+        q = max(q, eps)
+
+        H = np.array([
+            [-dx / r, -dy / r, 0.0],
+            [ dy / q, -dx / q, -1.0]
+        ])
+        return H
+
+    def step(self, u, z, landmark):
+        # Predict
+        mu_bar = self.motion_model(self.mu, u)
+        G = self.motion_jacobian(self.mu, u)
+        Sigma_bar = G @ self.Sigma @ G.T + self.R
+
+        # Update
+        H = self.measurement_jacobian(mu_bar, landmark)
+        z_pred = self.measurement_model(mu_bar, landmark)
+
+        S = H @ Sigma_bar @ H.T + self.Q
+        K = Sigma_bar @ H.T @ np.linalg.inv(S)
+
+        innovation = z.reshape(2, 1) - z_pred
+        innovation[1] = wrap_angle(innovation[1])
+
+        self.mu = mu_bar + K @ innovation
+        self.mu[2, 0] = wrap_angle(self.mu[2, 0])
+        self.Sigma = (np.eye(3) - K @ H) @ Sigma_bar
+
+        return self.mu, self.Sigma, mu_bar, Sigma_bar, K
+
+# Simulation: noisy motion + noisy meas + EKF
+def simulate_noisy_motion_and_ekf(
+    q0, N, dt, v_cmd, w_cmd,
+    sigma_v, sigma_w,
+    sigma_r, sigma_b,
+    landmarks,
+    used_landmark_idx=0,
+    seed_motion=7,
+    seed_meas=123
+):
+    rng_m = np.random.default_rng(seed_motion)
+    rng_z = np.random.default_rng(seed_meas)
+
+    # "True" (noisy) motion trajectory
+    q_true = np.zeros((N, 3))
+    q = q0.copy()
+    for k in range(N):
+        v = v_cmd + rng_m.normal(0.0, sigma_v)
+        w = w_cmd + rng_m.normal(0.0, sigma_w)
+        q = step_unicycle(q, v, w, dt)
+        q_true[k] = q
+
+    # Noisy measurements z_k = [r, b] to one landmark
+    lm = tuple(landmarks[used_landmark_idx])
+    z_hist = np.zeros((N, 2))
+    meas_xy = np.zeros((N, 2))  # for visualization (measured point in world)
+    for k in range(N):
+        z = measure_range_bearing(q_true[k], lm, noisy=True, sigma_r=sigma_r, sigma_b=sigma_b, rng=rng_z)
+        z_hist[k] = z
+        mx, my = rb_to_xy(q_true[k], z[0], z[1])
+        meas_xy[k] = [mx, my]
+
+    # EKF init (similar vibe: start at origin with some covariance)
+    Q_motion = np.diag([0.05**2, 0.05**2, 0.01**2])  # tune like your EKF example
+    R_meas = np.diag([sigma_r**2, sigma_b**2])
+
+    # reasonable init: use q0, but you can set to zeros if you want
+    mu0 = np.array([q0[0], q0[1], q0[2]])
+    Sigma0 = np.diag([0.5**2, 0.5**2, np.deg2rad(20)**2])
+
+    ekf = EKF(Q_motion, R_meas, dt, mu0=mu0, Sigma0=Sigma0)
+
+    mu_hist = np.zeros((N, 3))
+    for k in range(N):
+        ekf.step((v_cmd, w_cmd), z_hist[k], lm)
+        mu_hist[k] = ekf.mu.flatten()
+
+    return q_true, z_hist, mu_hist, meas_xy, lm
+
+def animate_noisy_vs_ekf(
+    q_true, mu_hist, meas_xy, landmarks, used_landmark,
+    title, out_gif, fps=25
+):
+    N = q_true.shape[0]
+    trajs_for_bounds = [q_true, mu_hist]
+    xmin, xmax, ymin, ymax = compute_bounds(trajs_for_bounds, landmarks=landmarks, pad=1.0)
 
     fig, ax = plt.subplots()
     ax.set_title(title)
@@ -111,138 +202,103 @@ def animate_motion(trajs, title, out_gif, landmarks=None, show_lidar=False,
     ax.grid(True)
 
     # Landmarks
-    if landmarks is not None:
-        ax.scatter(landmarks[:, 0], landmarks[:, 1],
-                   marker="s", color="black", label="landmarks")
+    ax.scatter(landmarks[:, 0], landmarks[:, 1], marker="s", color="black", label="landmarks")
+    ax.scatter([used_landmark[0]], [used_landmark[1]], marker="*", s=180, color="black", label="used landmark")
 
-    traj_lines = []
-    robot_pts = []
-    heading_lines = []
+    # Lines
+    (true_ln,) = ax.plot([], [], linewidth=2.2, color="black", label="true (noisy motion)")
+    (ekf_ln,)  = ax.plot([], [], linewidth=2.2, linestyle="--", color="purple", label="EKF estimate")
 
-    # Create graphical objects per robot
-    for i in range(num_robots):
-        color = robot_colors[i]
+    # Current position dots
+    (true_pt,) = ax.plot([], [], marker="o", markersize=6, linestyle="None", color="black")
+    (ekf_pt,)  = ax.plot([], [], marker="o", markersize=6, linestyle="None", color="purple")
 
-        # Full trajectory line
-        (traj_ln,) = ax.plot([], [], linewidth=2, color=color, label=f"robot {i}")
-        traj_lines.append(traj_ln)
+    # Optional: measurement ray to measured point
+    (meas_ray,) = ax.plot([], [], linewidth=1.0, color="red", alpha=0.9, label="measurement ray")
+    (meas_pt,)  = ax.plot([], [], marker="x", markersize=7, linestyle="None", color="red", alpha=0.9)
 
-        # Robot body
-        (pt,) = ax.plot([], [], marker="o", markersize=6,
-                        linestyle="None", color=color)
-        robot_pts.append(pt)
-
-        # Heading line
-        (hd,) = ax.plot([], [], linewidth=2.5, color=color)
-        heading_lines.append(hd)
-
-        # Start & End markers (same color)
-        tr = trajs[i]
-        x0, y0 = tr[0, 0], tr[0, 1]
-        xf, yf = tr[-1, 0], tr[-1, 1]
-
-        ax.plot(x0, y0, marker="o", markersize=10,
-                markerfacecolor="none", markeredgewidth=2.5,
-                markeredgecolor=color)
-
-        ax.plot(xf, yf, marker="o", markersize=10,
-                markerfacecolor="none", markeredgewidth=2.5,
-                markeredgecolor=color)
-
-    lidar_lines = []
-
-    def clear_lidar_lines():
-        nonlocal lidar_lines
-        for ln in lidar_lines:
-            ln.remove()
-        lidar_lines = []
+    ax.legend(loc="upper right")
 
     def init():
-        for i in range(num_robots):
-            traj_lines[i].set_data([], [])
-            robot_pts[i].set_data([], [])
-            heading_lines[i].set_data([], [])
-        clear_lidar_lines()
-        return traj_lines + robot_pts + heading_lines
+        true_ln.set_data([], [])
+        ekf_ln.set_data([], [])
+        true_pt.set_data([], [])
+        ekf_pt.set_data([], [])
+        meas_ray.set_data([], [])
+        meas_pt.set_data([], [])
+        return [true_ln, ekf_ln, true_pt, ekf_pt, meas_ray, meas_pt]
 
     def update(k):
+        # paths
+        true_ln.set_data(q_true[:k+1, 0], q_true[:k+1, 1])
+        ekf_ln.set_data(mu_hist[:k+1, 0], mu_hist[:k+1, 1])
 
-        if show_lidar:
-            clear_lidar_lines()
+        # current points
+        tx, ty = q_true[k, 0], q_true[k, 1]
+        ex, ey = mu_hist[k, 0], mu_hist[k, 1]
+        true_pt.set_data([tx], [ty])
+        ekf_pt.set_data([ex], [ey])
 
-        artists = []
+        # measurement viz (from true pose to measured point)
+        mx, my = meas_xy[k]
+        meas_ray.set_data([tx, mx], [ty, my])
+        meas_pt.set_data([mx], [my])
 
-        for i, tr in enumerate(trajs):
-            color = robot_colors[i]
+        return [true_ln, ekf_ln, true_pt, ekf_pt, meas_ray, meas_pt]
 
-            # FULL trajectory
-            traj_lines[i].set_data(tr[:k+1, 0], tr[:k+1, 1])
-            artists.append(traj_lines[i])
-
-            x, y, th = tr[k]
-
-            # Robot body
-            robot_pts[i].set_data([x], [y])
-            artists.append(robot_pts[i])
-
-            # Heading
-            hx = x + 0.4 * np.cos(th)
-            hy = y + 0.4 * np.sin(th)
-            heading_lines[i].set_data([x, hx], [y, hy])
-            artists.append(heading_lines[i])
-
-            # LiDAR rays
-            if show_lidar and (landmarks is not None):
-                det_idxs = lidar_detect(tr[k], landmarks,
-                                        r_max=r_max, fov=fov)
-                for idx in det_idxs:
-                    lx, ly = landmarks[idx]
-                    (ln,) = ax.plot([x, lx], [y, ly],
-                                    linewidth=0.8, color=color)
-                    lidar_lines.append(ln)
-                    artists.append(ln)
-
-        return artists
-
-    ax.legend()
-
-    anim = FuncAnimation(fig, update,
-                         frames=N_local,
-                         init_func=init,
-                         blit=True,
-                         interval=int(1000 / fps))
-
-    writer = PillowWriter(fps=fps)
-    anim.save(out_gif, writer=writer)
+    anim = FuncAnimation(fig, update, frames=N, init_func=init, blit=True, interval=int(1000 / fps))
+    anim.save(out_gif, writer=PillowWriter(fps=fps))
     plt.close(fig)
-
     print(f"Saved: {out_gif}")
 
-animate_motion(
-    trajs_clean,
-    title="Simulation 1: Ground truth (no noise)",
-    out_gif="sim1_clean.gif",
-    landmarks=None,
-    show_lidar=False,
-    fps=25
-)
+if __name__ == "__main__":
+    dt = 0.05
+    T = 40.0
+    N = int(T / dt)
 
-animate_motion(
-    trajs_noisy,
-    title="Simulation 2: Motion with Gaussian noise",
-    out_gif="sim2_noisy.gif",
-    landmarks=None,
-    show_lidar=False,
-    fps=25
-)
+    R_circle = 3.0
+    v_cmd = 0.6
+    w_cmd = v_cmd / R_circle
 
-animate_motion(
-    trajs_clean,
-    title="Simulation 3: Ground truth + LiDAR detections to landmarks",
-    out_gif="sim3_lidar.gif",
-    landmarks=landmarks,
-    show_lidar=True,
-    r_max=8.0,
-    fov=np.deg2rad(180),
-    fps=25
-)
+    # Motion noise (inputs)
+    sigma_v = 0.25
+    sigma_w = 0.20
+
+    # Measurement noise (range-bearing)
+    sigma_r = 0.20
+    sigma_b = np.deg2rad(2.0)
+
+    q0 = np.array([0.0, 0.0, 0.0])
+
+    landmarks = np.array([
+        [4.0, 4.0],
+        [6.0, 1.0],
+        [1.0, 6.5],
+        [-2.0, 5.0],
+        [-4.5, 1.5],
+        [-3.5, -2.5],
+        [2.5, -3.5],
+        [6.0, -2.0],
+    ])
+
+    q_true, z_hist, mu_hist, meas_xy, used_lm = simulate_noisy_motion_and_ekf(
+        q0=q0, N=N, dt=dt,
+        v_cmd=v_cmd, w_cmd=w_cmd,
+        sigma_v=sigma_v, sigma_w=sigma_w,
+        sigma_r=sigma_r, sigma_b=sigma_b,
+        landmarks=landmarks,
+        used_landmark_idx=0,
+        seed_motion=7,
+        seed_meas=123
+    )
+
+    animate_noisy_vs_ekf(
+        q_true=q_true,
+        mu_hist=mu_hist,
+        meas_xy=meas_xy,
+        landmarks=landmarks,
+        used_landmark=used_lm,
+        title="Simulation 5: Noisy motion + noisy measurement + EKF correction",
+        out_gif="sim5_noisy_motion_ekf.gif",
+        fps=25
+    )

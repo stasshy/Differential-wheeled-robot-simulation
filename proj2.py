@@ -49,14 +49,14 @@ def kalman_filter_step(mu_prev, Sigma_prev, u, z, A, B, C, R, Q, dt):
     return mu, Sigma, mu_bar, Sigma_bar, K
 
 def simulate_sequences(u=0.2, seed=0,dt=0.02):
-    T = 10.0
+    T = 5.0
     N = int(T / dt)
     rng = np.random.default_rng(seed)
 
     # Noise covariances
     # Motion noise covariance R (state noise)
     # Measurement noise covariance Q (measurement noise)
-    R = np.diag([0.01**2, 0.02**2]) # το πρωτο ειναι θορυβος στη θεση, το δευτερο στη ταχυτητα
+    R = np.diag([0.05**2, 0.01**2]) # το πρωτο ειναι θορυβος στη θεση, το δευτερο στη ταχυτητα
     Q = np.array([[0.3**2]])  # measurement noise variance for position
 
     # Initial true state x0 = [q, qdot]
@@ -86,8 +86,8 @@ def simulate_sequences(u=0.2, seed=0,dt=0.02):
     # Kalman on noisy measurements
     # Initialize KF mean using the first measurement z0
     z0 = z_noisy[0, 0]          # first noisy position measurement (scalar) for initial mu
-    mu = np.array([z0, 0.0])    # mu0 = [q0_meas, v0_guess]
-    Sigma = np.diag([2.0**2, 2.0**2])       # initial covariance
+    mu = np.array([x0[0], 0.0])    # mu0 = [q0_meas, v0_guess]
+    Sigma = np.diag([0.2**2, 0.2**2])       # initial covariance
 
     mu_hist = np.zeros((N, 2))
     for k in range(N):
