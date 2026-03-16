@@ -1,0 +1,3 @@
+<body name="obstacle_{ID}" pos="{X} {Y} {Z}">
+  <geom type="box" size="{SX} {SY} {SZ}" rgba="0.2 0.2 0.8 1"/>
+</body>

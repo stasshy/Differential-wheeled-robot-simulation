@@ -2,17 +2,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 
-
 def wrap_angle(a):
     return (a + np.pi) % (2 * np.pi) - np.pi
-
 
 def step_unicycle(q, v, w, dt):
     x, y, th = q
     return np.array([x + v * np.cos(th) * dt,
                      y + v * np.sin(th) * dt,
                      wrap_angle(th + w * dt)])
-
 
 def compute_bounds(trajs, landmarks=None, est_landmarks_hist=None, pad=1.0):
     xs = np.concatenate([tr[:, 0] for tr in trajs])
@@ -28,12 +25,10 @@ def compute_bounds(trajs, landmarks=None, est_landmarks_hist=None, pad=1.0):
 
     return xs.min() - pad, xs.max() + pad, ys.min() - pad, ys.max() + pad
 
-
 def rb_to_xy(q, r, b):
     x, y, th = q
     ang = th + b
     return x + r * np.cos(ang), y + r * np.sin(ang)
-
 
 def simulate_ground_truth_noiseless(q0, N, dt, v_cmd, w_cmd):
     q_hist = np.zeros((N, 3))
@@ -43,7 +38,6 @@ def simulate_ground_truth_noiseless(q0, N, dt, v_cmd, w_cmd):
         q_hist[k] = q
     return q_hist
 
-
 def is_landmark_in_fov(q, landmark, fov_deg=180.0, max_range=np.inf):
     x, y, th = q
     lx, ly = landmark
@@ -52,7 +46,6 @@ def is_landmark_in_fov(q, landmark, fov_deg=180.0, max_range=np.inf):
     b = wrap_angle(np.arctan2(dy, dx) - th)
     half_fov = np.deg2rad(fov_deg / 2.0)
     return (-half_fov <= b <= half_fov) and (r <= max_range), r, b
-
 
 class EKFSLAM:
     def __init__(self, Q_motion, R_meas, dt, n_landmarks=2, mu0=None, Sigma0=None):
@@ -173,7 +166,6 @@ class EKFSLAM:
             })
         return self.mu, self.Sigma, debug_info
 
-
 def simulate_slam_step(q, u, landmarks, R_motion, Q_meas, rng, dt, fov_deg=180.0, max_range=5.0):
     v_cmd, w_cmd = u
     q_mean = step_unicycle(q, v_cmd, w_cmd, dt)
@@ -189,7 +181,6 @@ def simulate_slam_step(q, u, landmarks, R_motion, Q_meas, rng, dt, fov_deg=180.0
             measurements.append((j, z))
 
     return q_new, measurements
-
 
 def simulate_noisy_motion_and_ekf_slam(
     q0, N, dt, v_cmd, w_cmd, R_motion, Q_meas, landmarks,
@@ -236,7 +227,6 @@ def simulate_noisy_motion_and_ekf_slam(
 
     return q_true, mu_hist, Sigma_hist, meas_hist, observed_hist
 
-
 def compute_fov_measurements_for_animation(q_true, landmarks, fov_deg=180.0, max_range=np.inf):
     visible_rays = []
     for q in q_true:
@@ -250,7 +240,6 @@ def compute_fov_measurements_for_animation(q_true, landmarks, fov_deg=180.0, max
         visible_rays.append(rays_k)
     return visible_rays
 
-
 def extract_estimated_landmarks(mu_hist, n_landmarks):
     est = np.zeros((mu_hist.shape[0], n_landmarks, 2))
     for j in range(n_landmarks):
@@ -258,7 +247,6 @@ def extract_estimated_landmarks(mu_hist, n_landmarks):
         est[:, j, 0] = mu_hist[:, b]
         est[:, j, 1] = mu_hist[:, b + 1]
     return est
-
 
 def animate_ekf_slam(
     q_true, mu_hist, q_gt_noiseless, landmarks, observed_hist,
@@ -384,7 +372,6 @@ def animate_ekf_slam(
     anim.save(out_gif, writer=PillowWriter(fps=fps))
     plt.close(fig)
     print(f"Saved: {out_gif}")
-
 
 if __name__ == "__main__":
     dt = 0.05

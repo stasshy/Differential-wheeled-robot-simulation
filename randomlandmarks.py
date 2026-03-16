@@ -280,10 +280,10 @@ if __name__ == "__main__":
     q0 = np.array([0.0, 0.0, 0.0])
     u = (0.6, 0.2)
 
-    R_motion = np.diag([0.003**2, 0.003**2, np.deg2rad(0.1)**2])
+    R_motion = np.diag([0.005**2, 0.005**2, np.deg2rad(0.2)**2])
     Q_meas = np.diag([0.01**2, np.deg2rad(0.25)**2])
 
-    landmarks = random_landmarks(n=4, xmin=-5, xmax=5, ymin=-5, ymax=5, min_dist=2.0)
+    landmarks = random_landmarks(n=15, xmin=-5, xmax=5, ymin=-5, ymax=5, min_dist=2.0)
 
     fov_deg = 180.0
     max_range = 7.0

@@ -1,0 +1,118 @@
+<mujoco model="TB3-WafflePi scene">
+  <include file="turtlebot3_waffle_pi.xml"/>
+
+  <statistic center="0 0 0.4" extent="6"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="120" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0"
+             width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+             rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
+             markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true"
+              texrepeat="5 5" reflectance="0.2"/>
+
+    <material name="ekf_lm_mat" rgba="0.8 0 0.9 1"/>
+    <material name="true_robot_mat" rgba="0 0 1 1"/>
+    <material name="ekf_robot_mat" rgba="0.8 0 0.9 1"/>
+    <material name="gt_robot_mat" rgba="0.85 0.85 0.85 1"/>
+    <material name="fov_mat" rgba="0 1 0 0.6"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+
+    
+    <body name="obstacle_0" pos="-3.265 3.662 0.142">
+      <geom type="box" size="0.188 0.125 0.142" rgba="0.2 0.2 0.8 1"/>
+    </body>
+
+    <body name="obstacle_1" pos="-3.601 1.335 0.201">
+      <geom type="box" size="0.138 0.138 0.201" rgba="0.2 0.2 0.8 1"/>
+    </body>
+
+    <body name="obstacle_2" pos="0.044 -1.313 0.202">
+      <geom type="box" size="0.212 0.148 0.202" rgba="0.2 0.2 0.8 1"/>
+    </body>
+
+    <body name="obstacle_3" pos="1.139 3.630 0.144">
+      <geom type="box" size="0.209 0.171 0.144" rgba="0.2 0.2 0.8 1"/>
+    </body>
+
+    <body name="obstacle_4" pos="-4.236 -4.386 0.194">
+      <geom type="box" size="0.202 0.141 0.194" rgba="0.2 0.2 0.8 1"/>
+    </body>
+
+    <body name="obstacle_5" pos="3.322 3.367 0.143">
+      <geom type="box" size="0.183 0.213 0.143" rgba="0.2 0.2 0.8 1"/>
+    </body>
+
+    <body name="obstacle_6" pos="-0.533 0.649 0.143">
+      <geom type="box" size="0.200 0.172 0.143" rgba="0.2 0.2 0.8 1"/>
+    </body>
+
+    <body name="obstacle_7" pos="3.735 -1.432 0.178">
+      <geom type="box" size="0.137 0.170 0.178" rgba="0.2 0.2 0.8 1"/>
+    </body>
+
+    <body name="est_landmark_0" mocap="true" pos="1000 1000 0.45">
+      <geom type="sphere" size="0.09" material="ekf_lm_mat" contype="0" conaffinity="0"/>
+    </body>
+
+    <body name="est_landmark_1" mocap="true" pos="1000 1000 0.45">
+      <geom type="sphere" size="0.09" material="ekf_lm_mat" contype="0" conaffinity="0"/>
+    </body>
+
+    <body name="est_landmark_2" mocap="true" pos="1000 1000 0.45">
+      <geom type="sphere" size="0.09" material="ekf_lm_mat" contype="0" conaffinity="0"/>
+    </body>
+
+    <body name="est_landmark_3" mocap="true" pos="1000 1000 0.45">
+      <geom type="sphere" size="0.09" material="ekf_lm_mat" contype="0" conaffinity="0"/>
+    </body>
+
+    <body name="est_landmark_4" mocap="true" pos="1000 1000 0.45">
+      <geom type="sphere" size="0.09" material="ekf_lm_mat" contype="0" conaffinity="0"/>
+    </body>
+
+    <body name="est_landmark_5" mocap="true" pos="1000 1000 0.45">
+      <geom type="sphere" size="0.09" material="ekf_lm_mat" contype="0" conaffinity="0"/>
+    </body>
+
+    <body name="est_landmark_6" mocap="true" pos="1000 1000 0.45">
+      <geom type="sphere" size="0.09" material="ekf_lm_mat" contype="0" conaffinity="0"/>
+    </body>
+
+    <body name="est_landmark_7" mocap="true" pos="1000 1000 0.45">
+      <geom type="sphere" size="0.09" material="ekf_lm_mat" contype="0" conaffinity="0"/>
+    </body>
+    <!-- EST_LANDMARKS_GO_HERE -->
+
+    <body name="true_robot_marker" mocap="true" pos="0 0 0.08">
+      <geom type="sphere" size="0.07" material="true_robot_mat" contype="0" conaffinity="0"/>
+    </body>
+
+    <body name="ekf_robot_marker" mocap="true" pos="0 0 0.10">
+      <geom type="sphere" size="0.06" material="ekf_robot_mat" contype="0" conaffinity="0"/>
+    </body>
+
+    <body name="gt_robot_marker" mocap="true" pos="0 0 0.12">
+      <geom type="sphere" size="0.05" material="gt_robot_mat" contype="0" conaffinity="0"/>
+    </body>
+
+    <body name="fov_left_marker" mocap="true" pos="0 0 0.04">
+      <geom type="sphere" size="0.04" material="fov_mat" contype="0" conaffinity="0"/>
+    </body>
+
+    <body name="fov_right_marker" mocap="true" pos="0 0 0.04">
+      <geom type="sphere" size="0.04" material="fov_mat" contype="0" conaffinity="0"/>
+    </body>
+  </worldbody>
+</mujoco>

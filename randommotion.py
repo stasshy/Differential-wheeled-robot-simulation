@@ -2,10 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 
-
 def wrap_angle(a):
     return (a + np.pi) % (2 * np.pi) - np.pi
-
 
 def compute_bounds(trajs, landmarks=None, est_landmarks_hist=None, pad=1.0):
     xs = np.concatenate([tr[:, 0] for tr in trajs])
@@ -18,12 +16,10 @@ def compute_bounds(trajs, landmarks=None, est_landmarks_hist=None, pad=1.0):
         ys = np.concatenate([ys, est_landmarks_hist[:, :, 1].ravel()])
     return xs.min() - pad, xs.max() + pad, ys.min() - pad, ys.max() + pad
 
-
 def rb_to_xy(q, r, b):
     x, y, th = q
     ang = th + b
     return x + r * np.cos(ang), y + r * np.sin(ang)
-
 
 def velocity_motion_model(q, u, dt):
     x, y, th = q
@@ -38,7 +34,6 @@ def velocity_motion_model(q, u, dt):
         wrap_angle(th + w * dt)
     ])
 
-
 def motion_jacobian_robot(q, u, dt):
     _, _, th = q
     v, w = u
@@ -50,7 +45,6 @@ def motion_jacobian_robot(q, u, dt):
         Gx[1, 2] = -(v / w) * np.sin(th) + (v / w) * np.sin(th + w * dt)
     return Gx
 
-
 def is_landmark_in_fov(q, landmark, fov_deg=180.0, max_range=np.inf):
     x, y, th = q
     lx, ly = landmark
@@ -60,7 +54,6 @@ def is_landmark_in_fov(q, landmark, fov_deg=180.0, max_range=np.inf):
     half_fov = np.deg2rad(fov_deg / 2.0)
     return (-half_fov <= b <= half_fov) and (r <= max_range), r, b
 
-
 def measure_range_bearing(q, landmark, Q_meas, rng):
     x, y, th = q
     lx, ly = landmark
@@ -69,7 +62,6 @@ def measure_range_bearing(q, landmark, Q_meas, rng):
     z += rng.multivariate_normal(np.zeros(2), Q_meas)
     z[1] = wrap_angle(z[1])
     return z
-
 
 def control_law(k, dt):
     t = k * dt
@@ -82,7 +74,6 @@ def control_law(k, dt):
     if t < 30.0:
         return np.array([0.6, -0.28])
     return np.array([0.75, 0.05])
-
 
 class EKFSLAM:
     def __init__(self, R_motion_filter, Q_meas_filter, dt, n_landmarks=2, mu0=None, Sigma0=None):
@@ -188,7 +179,6 @@ class EKFSLAM:
             self.correct_one_landmark(j, z)
         return self.mu, self.Sigma
 
-
 def simulate_ground_truth_noiseless(q0, N, dt):
     q_hist = np.zeros((N, 3))
     q = q0.copy()
@@ -196,7 +186,6 @@ def simulate_ground_truth_noiseless(q0, N, dt):
         q = velocity_motion_model(q, control_law(k, dt), dt)
         q_hist[k] = q
     return q_hist
-
 
 def simulate_slam_step(q, u, landmarks, R_motion_true, Q_meas_true, rng, dt, fov_deg=180.0, max_range=7.0):
     q_new = velocity_motion_model(q, u, dt) + rng.multivariate_normal(np.zeros(3), R_motion_true)
@@ -208,7 +197,6 @@ def simulate_slam_step(q, u, landmarks, R_motion_true, Q_meas_true, rng, dt, fov
         if ok:
             measurements.append((j, measure_range_bearing(q_new, lm, Q_meas_true, rng)))
     return q_new, measurements
-
 
 def simulate_noisy_motion_and_ekf_slam(
     q0, N, dt, R_motion_true, Q_meas_true,
@@ -262,7 +250,6 @@ def compute_fov_measurements_for_animation(q_true, landmarks, fov_deg=180.0, max
         visible_rays.append(rays)
     return visible_rays
 
-
 def extract_estimated_landmarks(mu_hist, n_landmarks):
     est = np.zeros((mu_hist.shape[0], n_landmarks, 2))
     for j in range(n_landmarks):
@@ -270,7 +257,6 @@ def extract_estimated_landmarks(mu_hist, n_landmarks):
         est[:, j, 0] = mu_hist[:, b]
         est[:, j, 1] = mu_hist[:, b + 1]
     return est
-
 
 def animate_ekf_slam(
     q_true, mu_hist, q_gt_noiseless, landmarks, observed_hist,
@@ -386,7 +372,6 @@ def animate_ekf_slam(
     anim.save(out_gif, writer=PillowWriter(fps=fps))
     plt.close(fig)
     print(f"Saved: {out_gif}")
-
 
 if __name__ == "__main__":
     dt = 0.05
