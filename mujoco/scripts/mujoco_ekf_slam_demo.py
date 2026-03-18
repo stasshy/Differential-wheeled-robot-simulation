@@ -223,6 +223,14 @@ class EKFSLAM:
         R_full[:3, :3] = self.R
         self.Sigma = G @ self.Sigma @ G.T + R_full
 
+        def init_landmark(self, j, z):
+            r, b = z
+            x, y, th = self.mu[0, 0], self.mu[1, 0], self.mu[2, 0]
+            idx = self.lm_idx(j)
+            self.mu[idx, 0] = x + r * np.cos(th + b)
+            self.mu[idx + 1, 0] = y + r * np.sin(th + b)
+            self.observed[j] = True
+
     def measurement_model(self, j):
         x, y, th = self.mu[0, 0], self.mu[1, 0], self.mu[2, 0]
         idx = self.lm_idx(j)
@@ -510,9 +518,9 @@ def main():
         min_dist=2.0
     )
 
-    base = Path(__file__).resolve().parent
-    template = base.parent / "models" / "TB3-WafflePi scene.xml"
-    scene = base.parent / "models" / "generated_scene.xml"
+    base = Path(__file__).parent
+    template = base / "TB3-WafflePi scene.xml"
+    scene = base / "generated_scene.xml"
     build_scene(template, scene, landmarks, bounds)
 
     model = mujoco.MjModel.from_xml_path(str(scene))
