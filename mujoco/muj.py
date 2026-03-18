@@ -5,17 +5,10 @@ import mujoco.viewer
 import numpy as np
 import matplotlib.pyplot as plt
 
+
 def wrap_angle(a):
     return (a + np.pi) % (2 * np.pi) - np.pi
 
-def step_unicycle(q, u, dt):
-    x, y, th = q
-    v, w = u
-    return np.array([
-        x + v * np.cos(th) * dt,
-        y + v * np.sin(th) * dt,
-        wrap_angle(th + w * dt),
-    ])
 
 def random_landmarks(n=8, xmin=-4.5, xmax=4.5, ymin=-4.5, ymax=4.5,
                      min_dist=2.0, seed=None):
@@ -27,6 +20,7 @@ def random_landmarks(n=8, xmin=-4.5, xmax=4.5, ymin=-4.5, ymax=4.5,
             pts.append(p)
     return np.array(pts)
 
+
 def landmark_measurement(q, landmark):
     x, y, th = q
     lx, ly = landmark
@@ -35,6 +29,7 @@ def landmark_measurement(q, landmark):
     b = wrap_angle(np.arctan2(dy, dx) - th)
     return r, b
 
+
 def landmark_visible(q, landmark, fov_deg=360.0, max_range=3.0):
     r, b = landmark_measurement(q, landmark)
     if fov_deg >= 360.0:
@@ -42,38 +37,37 @@ def landmark_visible(q, landmark, fov_deg=360.0, max_range=3.0):
     half_fov = np.deg2rad(fov_deg / 2)
     return (-half_fov <= b <= half_fov) and (r <= max_range), r, b
 
-def compute_control(q, target, landmarks, bounds, rng,
-                    base_v=0.95, v_jitter=0.12,
-                    wander_w=0.22, target_gain=1.10,
+
+def compute_control(q, target, landmarks, bounds, rng, explorer_state,
+                    base_speed=7.8, speed_jitter=0.0,
+                    wander_bias=0.22, target_gain=1.10,
                     obstacle_dist=1.60, avoid_dist=1.05,
-                    boundary_margin=0.80, max_w=1.35):
+                    boundary_margin=0.80, max_diff=2.4,
+                    forced_turn_diff=6.5, forced_turn_speed=1.8):
     x, y, th = q
     xmin, xmax, ymin, ymax = bounds
 
-    v = base_v + rng.uniform(-v_jitter, v_jitter)
-    w = rng.uniform(-wander_w, wander_w)
+    speed_center = base_speed + rng.uniform(-speed_jitter, speed_jitter)
+    diff = rng.uniform(-wander_bias, wander_bias)
 
-    # steer toward current target
     if target is not None:
         desired = np.arctan2(target[1] - y, target[0] - x)
-        w += target_gain * wrap_angle(desired - th)
+        diff += target_gain * wrap_angle(desired - th)
 
-    # boundary avoidance
     if x > xmax - boundary_margin:
-        w += wrap_angle(np.pi - th)
+        diff += wrap_angle(np.pi - th)
     elif x < xmin + boundary_margin:
-        w += wrap_angle(0.0 - th)
+        diff += wrap_angle(0.0 - th)
 
     if y > ymax - boundary_margin:
-        w += wrap_angle(-np.pi / 2 - th)
+        diff += wrap_angle(-np.pi / 2 - th)
     elif y < ymin + boundary_margin:
-        w += wrap_angle(np.pi / 2 - th)
+        diff += wrap_angle(np.pi / 2 - th)
 
     if (x > xmax - 0.30 or x < xmin + 0.30 or
         y > ymax - 0.30 or y < ymin + 0.30):
-        v *= 0.45
+        speed_center *= 0.75
 
-    # obstacle avoidance
     nearest_dist = np.inf
     nearest_bearing = None
     for lm in landmarks:
@@ -84,61 +78,115 @@ def compute_control(q, target, landmarks, bounds, rng,
                 nearest_bearing = b
 
     if nearest_bearing is not None:
-        w += -1.15 if nearest_bearing >= 0 else 1.15
+        diff += -1.15 if nearest_bearing >= 0 else 1.15
         closeness = (obstacle_dist - nearest_dist) / obstacle_dist
         closeness = max(0.0, closeness)
-        w *= (1.0 + 1.5 * closeness)
-        v *= 0.25 if nearest_dist < avoid_dist else 0.60
+        diff *= (1.0 + 1.5 * closeness)
+        speed_center *= 0.65 if nearest_dist < avoid_dist else 0.80
 
-    return np.array([
-        np.clip(v, 0.30, 1.20),
-        np.clip(w, -max_w, max_w)
-    ])
+    if explorer_state["forced_turn_steps"] > 0:
+        diff = explorer_state["turn_sign"] * forced_turn_diff
+        speed_center = forced_turn_speed
+        explorer_state["forced_turn_steps"] -= 1
+
+    diff = np.clip(diff, -max_diff, max_diff)
+
+    v_left = speed_center - diff
+    v_right = speed_center + diff
+
+    v_left = np.clip(v_left, -7.88, 7.88)
+    v_right = np.clip(v_right, -7.88, 7.88)
+
+    return np.array([v_left, v_right])
+
+def yaw_to_quat(th):
+    return np.array([np.cos(th / 2), 0.0, 0.0, np.sin(th / 2)])
 
 
-def build_control_sequence(q0, N, dt, landmarks, bounds,
-                           fov_deg=360.0, max_range=3.0, seed=11):
-    rng = np.random.default_rng(seed)
-    q = q0.copy()
+def quat_to_yaw(quat):
+    w, x, y, z = quat
+    return np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
-    U = np.zeros((N, 2))
-    discovered = np.zeros(len(landmarks), dtype=bool)
-    current_target = None
 
-    for k in range(N):
-        for j, lm in enumerate(landmarks):
-            ok, _, _ = landmark_visible(q, lm, fov_deg, max_range)
-            if ok:
-                discovered[j] = True
+def set_free_body_pose(model, data, joint_name, x, y, th, z=0.0):
+    jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+    adr = model.jnt_qposadr[jid]
+    data.qpos[adr:adr + 3] = [x, y, z]
+    data.qpos[adr + 3:adr + 7] = yaw_to_quat(th)
 
-        remaining = np.where(~discovered)[0]
-        target = None
 
-        if len(remaining) > 0:
-            if current_target is None or discovered[current_target]:
-                dists = [np.linalg.norm(landmarks[j] - q[:2]) for j in remaining]
-                current_target = remaining[int(np.argmin(dists))]
-            target = landmarks[current_target]
-            if np.linalg.norm(target - q[:2]) < 0.8:
-                current_target = None
+def get_free_body_pose(model, data, joint_name):
+    jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+    adr = model.jnt_qposadr[jid]
+    x, y, _ = data.qpos[adr:adr + 3]
+    quat = data.qpos[adr + 3:adr + 7]
+    th = wrap_angle(quat_to_yaw(quat))
+    return np.array([x, y, th])
 
-        u = compute_control(q, target, landmarks, bounds, rng)
-        q = step_unicycle(q, u, dt)
 
-        xmin, xmax, ymin, ymax = bounds
-        q[0] = np.clip(q[0], xmin + 0.08, xmax - 0.08)
-        q[1] = np.clip(q[1], ymin + 0.08, ymax - 0.08)
-        q[2] = wrap_angle(q[2])
+def set_mocap_body(model, data, body_name, pos):
+    bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+    mid = model.body_mocapid[bid]
+    data.mocap_pos[mid] = np.array(pos)
+    data.mocap_quat[mid] = np.array([1.0, 0.0, 0.0, 0.0])
 
-        U[k] = u
 
-    return U
+def build_mujoco_sim_handles(model):
+    left_act = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "wheel_left")
+    right_act = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "wheel_right")
+
+    if left_act == -1 or right_act == -1:
+        raise ValueError("Δεν βρέθηκαν τα actuators wheel_left / wheel_right")
+
+    return {
+        "base_joint": "base_joint",
+        "left_act": left_act,
+        "right_act": right_act,
+    }
+
+
+def mujoco_motion_step(model, data, handles, qk, u_lr, z_height=0.0):
+    set_free_body_pose(model, data, handles["base_joint"], qk[0], qk[1], qk[2], z=z_height)
+
+    data.qvel[:] = 0.0
+    data.qacc[:] = 0.0
+
+    ctrl_min, ctrl_max = -7.88, 7.88
+    data.ctrl[handles["left_act"]] = np.clip(u_lr[0], ctrl_min, ctrl_max)
+    data.ctrl[handles["right_act"]] = np.clip(u_lr[1], ctrl_min, ctrl_max)
+
+    mujoco.mj_step(model, data)
+
+    qkp1 = get_free_body_pose(model, data, handles["base_joint"])
+    qkp1[2] = wrap_angle(qkp1[2])
+    return qkp1
+
+
+def add_motion_noise(q, R_motion, rng):
+    qn = q.copy()
+    qn = qn + rng.multivariate_normal(np.zeros(3), R_motion)
+    qn[2] = wrap_angle(qn[2])
+    return qn
+
+
+def mujoco_measurements(q, landmarks, Q_meas, rng,
+                        fov_deg=360.0, max_range=3.0):
+    measurements = []
+    for j, lm in enumerate(landmarks):
+        ok, r, b = landmark_visible(q, lm, fov_deg, max_range)
+        if ok:
+            z = np.array([r, b]) + rng.multivariate_normal(np.zeros(2), Q_meas)
+            z[1] = wrap_angle(z[1])
+            measurements.append((j, z))
+    return measurements
+
 
 class EKFSLAM:
-    def __init__(self, dt, n_landmarks, q0, R_motion, Q_meas):
+    def __init__(self, dt, n_landmarks, q0, R_motion, Q_meas, wheel_base):
         self.dt = dt
         self.n_landmarks = n_landmarks
         self.n = 3 + 2 * n_landmarks
+        self.wheel_base = wheel_base
 
         self.mu = np.zeros((self.n, 1))
         self.mu[:3, 0] = q0
@@ -151,25 +199,6 @@ class EKFSLAM:
         self.Q = Q_meas
         self.observed = [False] * n_landmarks
 
-    def lm_idx(self, j):
-        return 3 + 2 * j
-
-    def predict(self, u):
-        v, w = u
-        x, y, th = self.mu[0, 0], self.mu[1, 0], self.mu[2, 0]
-
-        self.mu[0, 0] = x + v * np.cos(th) * self.dt
-        self.mu[1, 0] = y + v * np.sin(th) * self.dt
-        self.mu[2, 0] = wrap_angle(th + w * self.dt)
-
-        G = np.eye(self.n)
-        G[0, 2] = -v * np.sin(th) * self.dt
-        G[1, 2] =  v * np.cos(th) * self.dt
-
-        R_full = np.zeros((self.n, self.n))
-        R_full[:3, :3] = self.R
-        self.Sigma = G @ self.Sigma @ G.T + R_full
-
     def init_landmark(self, j, z):
         r, b = z
         x, y, th = self.mu[0, 0], self.mu[1, 0], self.mu[2, 0]
@@ -177,6 +206,30 @@ class EKFSLAM:
         self.mu[idx, 0] = x + r * np.cos(th + b)
         self.mu[idx + 1, 0] = y + r * np.sin(th + b)
         self.observed[j] = True
+
+    def lm_idx(self, j):
+        return 3 + 2 * j
+
+    def predict(self, delta):
+        dx, dy, dth = delta
+
+        self.mu[0, 0] = self.mu[0, 0] + dx
+        self.mu[1, 0] = self.mu[1, 0] + dy
+        self.mu[2, 0] = wrap_angle(self.mu[2, 0] + dth)
+
+        G = np.eye(self.n)
+
+        R_full = np.zeros((self.n, self.n))
+        R_full[:3, :3] = self.R
+        self.Sigma = G @ self.Sigma @ G.T + R_full
+
+        def init_landmark(self, j, z):
+            r, b = z
+            x, y, th = self.mu[0, 0], self.mu[1, 0], self.mu[2, 0]
+            idx = self.lm_idx(j)
+            self.mu[idx, 0] = x + r * np.cos(th + b)
+            self.mu[idx + 1, 0] = y + r * np.sin(th + b)
+            self.observed[j] = True
 
     def measurement_model(self, j):
         x, y, th = self.mu[0, 0], self.mu[1, 0], self.mu[2, 0]
@@ -226,66 +279,13 @@ class EKFSLAM:
         I = np.eye(self.n)
         self.Sigma = (I - K @ H) @ self.Sigma @ (I - K @ H).T + K @ self.Q @ K.T
 
-    def step(self, u, measurements):
-        self.predict(u)
+    def step(self, delta, measurements):
+        self.predict(delta)
         mu_pred = self.mu.copy()
         Sigma_pred = self.Sigma.copy()
         for j, z in measurements:
             self.correct_one(j, z)
         return mu_pred, Sigma_pred
-
-def simulate_ground_truth(q0, dt, U, R_motion=None, seed=7):
-    rng = np.random.default_rng(seed)
-    q = q0.copy()
-    hist = np.zeros((len(U), 3))
-
-    for k, u in enumerate(U):
-        q = step_unicycle(q, u, dt)
-        if R_motion is not None:
-            q = q + rng.multivariate_normal(np.zeros(3), R_motion)
-            q[2] = wrap_angle(q[2])
-        hist[k] = q
-
-    return hist
-
-def simulate_slam(q0, dt, U, landmarks, R_motion, Q_meas,
-                  fov_deg=360.0, max_range=3.0, seed=7):
-    rng = np.random.default_rng(seed)
-    q = q0.copy()
-
-    N = len(U)
-    n_landmarks = len(landmarks)
-    n_state = 3 + 2 * n_landmarks
-
-    q_true = np.zeros((N, 3))
-    mu_hist = np.zeros((N, n_state))
-    mu_pred_hist = np.zeros((N, 3))
-    sigma_trace_hist = np.zeros(N)
-    observed_hist = np.zeros((N, n_landmarks), dtype=bool)
-
-    ekf = EKFSLAM(dt, n_landmarks, q0, R_motion, Q_meas)
-
-    for k, u in enumerate(U):
-        q = step_unicycle(q, u, dt) + rng.multivariate_normal(np.zeros(3), R_motion)
-        q[2] = wrap_angle(q[2])
-
-        measurements = []
-        for j, lm in enumerate(landmarks):
-            ok, r, b = landmark_visible(q, lm, fov_deg, max_range)
-            if ok:
-                z = np.array([r, b]) + rng.multivariate_normal(np.zeros(2), Q_meas)
-                z[1] = wrap_angle(z[1])
-                measurements.append((j, z))
-
-        mu_pred, Sigma_pred = ekf.step(u, measurements)
-
-        q_true[k] = q
-        mu_hist[k] = ekf.mu.flatten()
-        mu_pred_hist[k] = mu_pred[:3, 0]
-        sigma_trace_hist[k] = np.trace(Sigma_pred[:3, :3])
-        observed_hist[k] = np.array(ekf.observed)
-
-    return q_true, mu_hist, mu_pred_hist, sigma_trace_hist, observed_hist
 
 
 def cube_xml_from_landmarks(landmarks):
@@ -299,6 +299,7 @@ def cube_xml_from_landmarks(landmarks):
     </body>""")
     return "\n".join(parts)
 
+
 def est_landmark_xml(n_landmarks):
     return "\n".join(
         f"""
@@ -307,6 +308,7 @@ def est_landmark_xml(n_landmarks):
     </body>"""
         for j in range(n_landmarks)
     )
+
 
 def boundary_walls_xml(bounds, wall_thickness=0.06, wall_height=0.35):
     xmin, xmax, ymin, ymax = bounds
@@ -329,6 +331,7 @@ def boundary_walls_xml(bounds, wall_thickness=0.06, wall_height=0.35):
     </body>
     """
 
+
 def build_scene(template_path, out_path, landmarks, bounds):
     text = template_path.read_text(encoding="utf-8")
     if "<!-- OBSTACLES_GO_HERE -->" not in text:
@@ -344,29 +347,12 @@ def build_scene(template_path, out_path, landmarks, bounds):
     )
     out_path.write_text(generated, encoding="utf-8")
 
-def yaw_to_quat(th):
-    return np.array([np.cos(th / 2), 0.0, 0.0, np.sin(th / 2)])
-
-
-def set_free_body_pose(model, data, joint_name, x, y, th, z=0.0):
-    jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
-    adr = model.jnt_qposadr[jid]
-    data.qpos[adr:adr + 3] = [x, y, z]
-    data.qpos[adr + 3:adr + 7] = yaw_to_quat(th)
-
-
-def set_mocap_body(model, data, body_name, pos):
-    bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
-    mid = model.body_mocapid[bid]
-    data.mocap_pos[mid] = np.array(pos)
-    data.mocap_quat[mid] = np.array([1.0, 0.0, 0.0, 0.0])
-
 
 def setup_live_plot(landmarks, t, fov_deg=360.0, max_range=3.0):
     plt.ion()
 
-    fig = plt.figure(figsize=(14, 8))
-    gs = fig.add_gridspec(2, 2, width_ratios=[1.3, 1.0])
+    fig = plt.figure(figsize=(10, 6))
+    gs = fig.add_gridspec(2, 2, width_ratios=[1.15, 0.85])
 
     ax_map = fig.add_subplot(gs[:, 0])
     ax_mu = fig.add_subplot(gs[0, 1])
@@ -412,6 +398,15 @@ def setup_live_plot(landmarks, t, fov_deg=360.0, max_range=3.0):
     sigma_ln, = ax_sigma.plot([], [])
     ax_sigma.set_xlim(t[0], t[-1])
 
+    manager = plt.get_current_fig_manager()
+    try:
+        manager.window.wm_geometry("900x650+20+80")
+    except Exception:
+        try:
+            manager.window.setGeometry(20, 80, 900, 650)
+        except Exception:
+            pass
+
     return {
         "fig": fig, "ax_mu": ax_mu, "ax_sigma": ax_sigma,
         "true_ln": true_ln, "ekf_ln": ekf_ln, "gt_ln": gt_ln,
@@ -425,37 +420,36 @@ def setup_live_plot(landmarks, t, fov_deg=360.0, max_range=3.0):
 
 def update_live_plot(plotters, t, q_true_hist, mu_hist, mu_pred_hist,
                      sigma_trace_hist, q_gt_hist, observed_hist, landmarks, k):
-    tx, ty, th = q_true_hist[k]
+    tx_true, ty_true, th_true = q_true_hist[k]
+    tx_gt, ty_gt, _ = q_gt_hist[k]
     ex, ey = mu_hist[k, 0], mu_hist[k, 1]
-    gx, gy = q_gt_hist[k, 0], q_gt_hist[k, 1]
 
     plotters["true_ln"].set_data(q_true_hist[:k+1, 0], q_true_hist[:k+1, 1])
     plotters["ekf_ln"].set_data(mu_hist[:k+1, 0], mu_hist[:k+1, 1])
     plotters["gt_ln"].set_data(q_gt_hist[:k+1, 0], q_gt_hist[:k+1, 1])
 
-    plotters["true_pt"].set_data([tx], [ty])
+    plotters["true_pt"].set_data([tx_true], [ty_true])
     plotters["ekf_pt"].set_data([ex], [ey])
-    plotters["gt_pt"].set_data([gx], [gy])
+    plotters["gt_pt"].set_data([tx_gt], [ty_gt])
 
-    # lidar range
     fov_deg = plotters["fov_deg"]
     max_range = plotters["max_range"]
     if fov_deg >= 360.0:
-        ang = np.linspace(0, 2*np.pi, 200)
+        ang = np.linspace(0, 2 * np.pi, 200)
     else:
         half = np.deg2rad(fov_deg / 2)
-        ang = np.linspace(th - half, th + half, 120)
+        ang = np.linspace(th_true - half, th_true + half, 120)
+
     plotters["lidar_circle"].set_data(
-        tx + max_range * np.cos(ang),
-        ty + max_range * np.sin(ang),
+        tx_true + max_range * np.cos(ang),
+        ty_true + max_range * np.sin(ang),
     )
 
     plotters["heading_arrow"].set_data(
-        [tx, tx + 0.8 * np.cos(th)],
-        [ty, ty + 0.8 * np.sin(th)],
+        [tx_true, tx_true + 0.8 * np.cos(th_true)],
+        [ty_true, ty_true + 0.8 * np.sin(th_true)],
     )
 
-    # visible landmarks
     hit_x, hit_y = [], []
     for lm in landmarks:
         ok, _, _ = landmark_visible(q_true_hist[k], lm, fov_deg, max_range)
@@ -464,7 +458,6 @@ def update_live_plot(plotters, t, q_true_hist, mu_hist, mu_pred_hist,
             hit_y.append(lm[1])
     plotters["lidar_hits"].set_data(hit_x, hit_y)
 
-    # estimated landmarks
     for j, pt in enumerate(plotters["est_pts"]):
         if observed_hist[k, j]:
             idx = 3 + 2 * j
@@ -472,7 +465,6 @@ def update_live_plot(plotters, t, q_true_hist, mu_hist, mu_pred_hist,
         else:
             pt.set_data([], [])
 
-    # mu plots
     plotters["mu_x_ln"].set_data(t[:k+1], mu_pred_hist[:k+1, 0])
     plotters["mu_y_ln"].set_data(t[:k+1], mu_pred_hist[:k+1, 1])
     plotters["mu_th_ln"].set_data(t[:k+1], mu_pred_hist[:k+1, 2])
@@ -484,7 +476,6 @@ def update_live_plot(plotters, t, q_true_hist, mu_hist, mu_pred_hist,
     pad_mu = 0.08 * (mu_max - mu_min)
     plotters["ax_mu"].set_ylim(mu_min - pad_mu, mu_max + pad_mu)
 
-    # sigma plot
     plotters["sigma_ln"].set_data(t[:k+1], sigma_trace_hist[:k+1])
     smin, smax = np.min(sigma_trace_hist[:k+1]), np.max(sigma_trace_hist[:k+1])
     if abs(smax - smin) < 1e-12:
@@ -496,41 +487,83 @@ def update_live_plot(plotters, t, q_true_hist, mu_hist, mu_pred_hist,
     plotters["fig"].canvas.flush_events()
     plt.pause(0.001)
 
+
 def main():
-    dt = 0.05
-    T = 300.0
+    dt = 0.15
+    T = 150.0
     N = int(T / dt)
-    t = np.arange(N) * dt
+    t = np.arange(N + 1) * dt
 
     q0 = np.array([0.0, 0.0, 0.0])
-    R_motion = np.diag([0.005**2, 0.005**2, np.deg2rad(0.2)**2])
-    Q_meas = np.diag([0.01**2, np.deg2rad(0.25)**2])
+    R_motion = np.diag([0.03**2, 0.03**2, np.deg2rad(1.0)**2])
+    Q_meas = np.diag([0.05**2, np.deg2rad(1.0)**2])
 
     fov_deg = 360.0
     max_range = 3.0
     bounds = (-5.0, 5.0, -5.0, 5.0)
+    wheel_base = 0.288
 
-    landmarks = random_landmarks(n=8, xmin=-4.5, xmax=4.5, ymin=-4.5, ymax=4.5,
-                                 min_dist=2.0, seed=5)
+    rng_ctrl = np.random.default_rng(11)
+    rng_noise = np.random.default_rng(7)
 
-    U = build_control_sequence(q0, N, dt, landmarks, bounds, fov_deg, max_range, seed=11)
+    current_target = None
+
+    explorer_state = {
+        "no_landmark_steps": 0,
+        "forced_turn_steps": 0,
+        "turn_sign": 1.0,
+    }
+
+    landmarks = random_landmarks(
+        n=8, xmin=-4.5, xmax=4.5, ymin=-4.5, ymax=4.5,
+        min_dist=2.0
+    )
 
     base = Path(__file__).parent
     template = base / "TB3-WafflePi scene.xml"
     scene = base / "generated_scene.xml"
     build_scene(template, scene, landmarks, bounds)
 
-    q_true_hist, mu_hist, mu_pred_hist, sigma_trace_hist, observed_hist = simulate_slam(
-        q0, dt, U, landmarks, R_motion, Q_meas, fov_deg, max_range, seed=7
-    )
-    q_gt_hist = simulate_ground_truth(q0, dt, U)
+    model = mujoco.MjModel.from_xml_path(str(scene))
+    model.opt.timestep = dt
+
+    handles = build_mujoco_sim_handles(model)
+
+    data_gt = mujoco.MjData(model)
+    data_true = mujoco.MjData(model)
+    data_view = mujoco.MjData(model)
+
+    q_gt = q0.copy()
+    q_true = q0.copy()
+
+    n_landmarks = len(landmarks)
+    n_state = 3 + 2 * n_landmarks
+
+    q_gt_hist = np.zeros((N + 1, 3))
+    q_true_hist = np.zeros((N + 1, 3))
+    mu_hist = np.zeros((N + 1, n_state))
+    mu_pred_hist = np.zeros((N + 1, 3))
+    sigma_trace_hist = np.zeros(N + 1)
+    observed_hist = np.zeros((N + 1, n_landmarks), dtype=bool)
+    u_hist = np.zeros((N + 1, 2))
+
+    ekf = EKFSLAM(dt, n_landmarks, q0, R_motion, Q_meas, wheel_base)
+
+    q_gt_hist[0] = q0
+    q_true_hist[0] = q0
+    mu_hist[0] = ekf.mu.flatten()
+    mu_pred_hist[0] = ekf.mu[:3, 0]
+    sigma_trace_hist[0] = np.trace(ekf.Sigma[:3, :3])
+    observed_hist[0] = np.array(ekf.observed)
+    u_hist[0] = np.array([0.0, 0.0])
+
+    xmin, xmax, ymin, ymax = bounds
+    discovered = np.zeros(n_landmarks, dtype=bool)
+    current_target = None
 
     plotters = setup_live_plot(landmarks, t, fov_deg, max_range)
 
-    model = mujoco.MjModel.from_xml_path(str(scene))
-    data = mujoco.MjData(model)
-
-    with mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False) as viewer:
+    with mujoco.viewer.launch_passive(model, data_view, show_left_ui=False, show_right_ui=False) as viewer:
         with viewer.lock():
             viewer.cam.lookat[:] = [0.0, 0.0, 0.0]
             viewer.cam.distance = 12.0
@@ -538,45 +571,106 @@ def main():
             viewer.cam.elevation = -50
 
         k = 0
-        while viewer.is_running() and plt.fignum_exists(plotters["fig"].number):
-            i = k % N
-            q_true = q_true_hist[i]
-            q_gt = q_gt_hist[i]
+        while viewer.is_running() and plt.fignum_exists(plotters["fig"].number) and k < N:
+            visible_now = False
+            for j, lm in enumerate(landmarks):
+                ok, _, _ = landmark_visible(q_gt, lm, fov_deg, max_range)
+                if ok:
+                    discovered[j] = True
+                    visible_now = True
+
+            if visible_now:
+                explorer_state["no_landmark_steps"] = 0
+            else:
+                explorer_state["no_landmark_steps"] += 1
+
+            if explorer_state["forced_turn_steps"] == 0 and explorer_state["no_landmark_steps"] >= 20:
+                explorer_state["turn_sign"] = rng_ctrl.choice([-1.0, 1.0])
+                explorer_state["forced_turn_steps"] = 8
+                explorer_state["no_landmark_steps"] = 0
+
+            remaining = np.where(~discovered)[0]
+            target = None
+
+            if len(remaining) > 0:
+                if current_target is None or discovered[current_target]:
+                    dists = [np.linalg.norm(landmarks[j] - q_gt[:2]) for j in remaining]
+                    current_target = remaining[int(np.argmin(dists))]
+                target = landmarks[current_target]
+                if np.linalg.norm(target - q_gt[:2]) < 0.8:
+                    current_target = None
+
+            u_lr = compute_control(q_gt, target, landmarks, bounds, rng_ctrl, explorer_state)
+
+            q_gt_prev = q_gt.copy()
+            q_gt = mujoco_motion_step(model, data_gt, handles, q_gt, u_lr)
+
+            delta_gt = np.array([
+                q_gt[0] - q_gt_prev[0],
+                q_gt[1] - q_gt_prev[1],
+                wrap_angle(q_gt[2] - q_gt_prev[2]),
+            ])   
+
+            q_gt[0] = np.clip(q_gt[0], xmin + 0.08, xmax - 0.08)
+            q_gt[1] = np.clip(q_gt[1], ymin + 0.08, ymax - 0.08)
+            q_gt[2] = wrap_angle(q_gt[2])
+
+            q_true = q_gt.copy()
+            q_true = add_motion_noise(q_true, R_motion, rng_noise)
+            q_true[0] = np.clip(q_true[0], xmin + 0.08, xmax - 0.08)
+            q_true[1] = np.clip(q_true[1], ymin + 0.08, ymax - 0.08)
+            q_true[2] = wrap_angle(q_true[2])
+
+            measurements = mujoco_measurements(
+                q_true, landmarks, Q_meas, rng_noise,
+                fov_deg=fov_deg, max_range=max_range
+            )
+
+            mu_pred, Sigma_pred = ekf.step(delta_gt, measurements)
+
+            q_gt_hist[k + 1] = q_gt
+            q_true_hist[k + 1] = q_true
+            mu_hist[k + 1] = ekf.mu.flatten()
+            mu_pred_hist[k + 1] = mu_pred[:3, 0]
+            sigma_trace_hist[k + 1] = np.trace(Sigma_pred[:3, :3])
+            observed_hist[k + 1] = np.array(ekf.observed)
+            # u_hist[k + 1] = u_lr_exec
+
+            i = k + 1
             ekf_x, ekf_y, ekf_th = mu_hist[i, 0], mu_hist[i, 1], mu_hist[i, 2]
 
             with viewer.lock():
-                set_free_body_pose(model, data, "base_joint", q_true[0], q_true[1], q_true[2])
-                set_mocap_body(model, data, "true_robot_marker", [q_true[0], q_true[1], 0.08])
-                set_mocap_body(model, data, "ekf_robot_marker", [ekf_x, ekf_y, 0.10])
-                set_mocap_body(model, data, "gt_robot_marker", [q_gt[0], q_gt[1], 0.12])
+                set_free_body_pose(model, data_view, "base_joint", q_gt[0], q_gt[1], q_gt[2])
 
-                # hide old FOV rays for 360 lidar
-                set_mocap_body(model, data, "fov_left_marker", [1000, 1000, 0.04])
-                set_mocap_body(model, data, "fov_right_marker", [1000, 1000, 0.04])
+                set_mocap_body(model, data_view, "ekf_robot_marker", [ekf_x, ekf_y, 0.10])
 
-                for j in range(len(landmarks)):
-                    if observed_hist[i, j]:
-                        idx = 3 + 2 * j
+                # set_mocap_body(model, data_view, "fov_left_marker", [1000, 1000, 0.04])
+                # set_mocap_body(model, data_view, "fov_right_marker", [1000, 1000, 0.04])
+
+                for jj in range(len(landmarks)):
+                    if observed_hist[i, jj]:
+                        idx = 3 + 2 * jj
                         lx, ly = mu_hist[i, idx], mu_hist[i, idx + 1]
-                        set_mocap_body(model, data, f"est_landmark_{j}", [lx, ly, 0.45])
+                        set_mocap_body(model, data_view, f"est_landmark_{jj}", [lx, ly, 0.45])
                     else:
-                        set_mocap_body(model, data, f"est_landmark_{j}", [1000, 1000, 0.45])
+                        set_mocap_body(model, data_view, f"est_landmark_{jj}", [1000, 1000, 0.45])
 
-                mujoco.mj_forward(model, data)
+                mujoco.mj_forward(model, data_view)
 
             if i % 10 == 0:
                 print(f"\nStep {i}")
-                print(f"Control u = ({U[i,0]:.3f}, {U[i,1]:.3f})")
-                print(f"True robot = ({q_true[0]:.3f}, {q_true[1]:.3f}, {q_true[2]:.3f})")
-                print(f"EKF  robot = ({ekf_x:.3f}, {ekf_y:.3f}, {ekf_th:.3f})")
+                print(f"Control delta = ({delta_gt[0]:.3f}, {delta_gt[1]:.3f}, {delta_gt[2]:.3f})")
+                print(f"Ground truth = ({q_gt[0]:.3f}, {q_gt[1]:.3f}, {q_gt[2]:.3f})")
+                print(f"Noisy true   = ({q_true[0]:.3f}, {q_true[1]:.3f}, {q_true[2]:.3f})")
+                print(f"EKF estimate = ({ekf_x:.3f}, {ekf_y:.3f}, {ekf_th:.3f})")
                 print(f"trace(Sigma_pose_pred) = {sigma_trace_hist[i]:.6f}")
                 print("Estimated landmarks:")
-                for j in range(len(landmarks)):
-                    if observed_hist[i, j]:
-                        idx = 3 + 2 * j
-                        print(f"  LM{j}: ({mu_hist[i, idx]:.3f}, {mu_hist[i, idx + 1]:.3f})")
+                for jj in range(len(landmarks)):
+                    if observed_hist[i, jj]:
+                        idx = 3 + 2 * jj
+                        print(f"  LM{jj}: ({mu_hist[i, idx]:.3f}, {mu_hist[i, idx + 1]:.3f})")
                     else:
-                        print(f"  LM{j}: not observed yet")
+                        print(f"  LM{jj}: not observed yet")
 
             update_live_plot(
                 plotters, t, q_true_hist, mu_hist, mu_pred_hist,
@@ -584,7 +678,7 @@ def main():
             )
 
             viewer.sync()
-            time.sleep(dt)
+            time.sleep(0.0)
             k += 1
 
     plt.close("all")

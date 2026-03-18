@@ -22,7 +22,6 @@
     <material name="true_robot_mat" rgba="0 0 1 1"/>
     <material name="ekf_robot_mat" rgba="0.8 0 0.9 1"/>
     <material name="gt_robot_mat" rgba="0.85 0.85 0.85 1"/>
-    <material name="fov_mat" rgba="0 1 0 0.6"/>
   </asset>
 
   <worldbody>
@@ -30,35 +29,35 @@
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
 
     
-    <body name="obstacle_0" pos="2.745 2.771 0.142">
+    <body name="obstacle_0" pos="-1.006 -4.011 0.142">
       <geom type="box" size="0.188 0.125 0.142" rgba="0.2 0.2 0.8 1"/>
     </body>
 
-    <body name="obstacle_1" pos="0.138 -1.928 0.201">
+    <body name="obstacle_1" pos="1.076 -0.542 0.201">
       <geom type="box" size="0.138 0.138 0.201" rgba="0.2 0.2 0.8 1"/>
     </body>
 
-    <body name="obstacle_2" pos="-4.015 -1.050 0.202">
+    <body name="obstacle_2" pos="0.143 2.387 0.202">
       <geom type="box" size="0.212 0.148 0.202" rgba="0.2 0.2 0.8 1"/>
     </body>
 
-    <body name="obstacle_3" pos="-0.824 -4.093 0.144">
+    <body name="obstacle_3" pos="2.085 -3.891 0.144">
       <geom type="box" size="0.209 0.171 0.144" rgba="0.2 0.2 0.8 1"/>
     </body>
 
-    <body name="obstacle_4" pos="-4.061 4.493 0.194">
+    <body name="obstacle_4" pos="3.890 -1.219 0.194">
       <geom type="box" size="0.202 0.141 0.194" rgba="0.2 0.2 0.8 1"/>
     </body>
 
-    <body name="obstacle_5" pos="-0.585 4.268 0.143">
+    <body name="obstacle_5" pos="4.154 3.267 0.143">
       <geom type="box" size="0.183 0.213 0.143" rgba="0.2 0.2 0.8 1"/>
     </body>
 
-    <body name="obstacle_6" pos="-0.968 -0.063 0.143">
+    <body name="obstacle_6" pos="4.104 -3.602 0.143">
       <geom type="box" size="0.200 0.172 0.143" rgba="0.2 0.2 0.8 1"/>
     </body>
 
-    <body name="obstacle_7" pos="1.590 -3.953 0.178">
+    <body name="obstacle_7" pos="-3.171 3.879 0.178">
       <geom type="box" size="0.137 0.170 0.178" rgba="0.2 0.2 0.8 1"/>
     </body>
 
@@ -109,24 +108,9 @@
     
     <!-- EST_LANDMARKS_GO_HERE -->
 
-    <body name="true_robot_marker" mocap="true" pos="0 0 0.08">
-      <geom type="sphere" size="0.07" material="true_robot_mat" contype="0" conaffinity="0"/>
-    </body>
-
     <body name="ekf_robot_marker" mocap="true" pos="0 0 0.10">
       <geom type="sphere" size="0.06" material="ekf_robot_mat" contype="0" conaffinity="0"/>
     </body>
 
-    <body name="gt_robot_marker" mocap="true" pos="0 0 0.12">
-      <geom type="sphere" size="0.05" material="gt_robot_mat" contype="0" conaffinity="0"/>
-    </body>
-
-    <body name="fov_left_marker" mocap="true" pos="0 0 0.04">
-      <geom type="sphere" size="0.04" material="fov_mat" contype="0" conaffinity="0"/>
-    </body>
-
-    <body name="fov_right_marker" mocap="true" pos="0 0 0.04">
-      <geom type="sphere" size="0.04" material="fov_mat" contype="0" conaffinity="0"/>
-    </body>
   </worldbody>
 </mujoco>
