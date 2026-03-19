@@ -2,8 +2,8 @@ cff-version: 1.2.0
 title: Differential Wheeled Robot Simulation with EKF-SLAM
 message: "If you use this project, please cite it as follows."
 authors:
-  - family-names: Chatziparaskevas
-    given-names: Taxiarchis
+  - family-names: Chatziparaskeva
+    given-names: Anastasia
     affiliation: University of Patras
 keywords:
   - robotics
