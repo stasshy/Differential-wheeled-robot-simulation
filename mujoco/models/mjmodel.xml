@@ -1,5 +1,5 @@
 <mujoco model="TB3-WafflePi scene">
-  <compiler angle="radian" meshdir="assets/"/>
+  <compiler angle="radian" meshdir="../assets"/>
 
   <option impratio="10" cone="elliptic"/>
 

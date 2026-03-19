@@ -5,10 +5,8 @@ import mujoco.viewer
 import numpy as np
 import matplotlib.pyplot as plt
 
-
 def wrap_angle(a):
     return (a + np.pi) % (2 * np.pi) - np.pi
-
 
 def random_landmarks(n=8, xmin=-4.5, xmax=4.5, ymin=-4.5, ymax=4.5,
                      min_dist=2.0, seed=None):
@@ -20,7 +18,6 @@ def random_landmarks(n=8, xmin=-4.5, xmax=4.5, ymin=-4.5, ymax=4.5,
             pts.append(p)
     return np.array(pts)
 
-
 def landmark_measurement(q, landmark):
     x, y, th = q
     lx, ly = landmark
@@ -29,14 +26,12 @@ def landmark_measurement(q, landmark):
     b = wrap_angle(np.arctan2(dy, dx) - th)
     return r, b
 
-
 def landmark_visible(q, landmark, fov_deg=360.0, max_range=3.0):
     r, b = landmark_measurement(q, landmark)
     if fov_deg >= 360.0:
         return r <= max_range, r, b
     half_fov = np.deg2rad(fov_deg / 2)
     return (-half_fov <= b <= half_fov) and (r <= max_range), r, b
-
 
 def compute_control(q, target, landmarks, bounds, rng, explorer_state,
                     base_speed=7.8, speed_jitter=0.0,
@@ -102,18 +97,15 @@ def compute_control(q, target, landmarks, bounds, rng, explorer_state,
 def yaw_to_quat(th):
     return np.array([np.cos(th / 2), 0.0, 0.0, np.sin(th / 2)])
 
-
 def quat_to_yaw(quat):
     w, x, y, z = quat
     return np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-
 
 def set_free_body_pose(model, data, joint_name, x, y, th, z=0.0):
     jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
     adr = model.jnt_qposadr[jid]
     data.qpos[adr:adr + 3] = [x, y, z]
     data.qpos[adr + 3:adr + 7] = yaw_to_quat(th)
-
 
 def get_free_body_pose(model, data, joint_name):
     jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
@@ -123,13 +115,11 @@ def get_free_body_pose(model, data, joint_name):
     th = wrap_angle(quat_to_yaw(quat))
     return np.array([x, y, th])
 
-
 def set_mocap_body(model, data, body_name, pos):
     bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
     mid = model.body_mocapid[bid]
     data.mocap_pos[mid] = np.array(pos)
     data.mocap_quat[mid] = np.array([1.0, 0.0, 0.0, 0.0])
-
 
 def build_mujoco_sim_handles(model):
     left_act = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "wheel_left")
@@ -144,30 +134,23 @@ def build_mujoco_sim_handles(model):
         "right_act": right_act,
     }
 
-
-def mujoco_motion_step(model, data, handles, qk, u_lr, z_height=0.0):
-    set_free_body_pose(model, data, handles["base_joint"], qk[0], qk[1], qk[2], z=z_height)
-
-    data.qvel[:] = 0.0
-    data.qacc[:] = 0.0
-
+def mujoco_motion_step(model, data, handles, u_lr):
     ctrl_min, ctrl_max = -7.88, 7.88
+
     data.ctrl[handles["left_act"]] = np.clip(u_lr[0], ctrl_min, ctrl_max)
     data.ctrl[handles["right_act"]] = np.clip(u_lr[1], ctrl_min, ctrl_max)
 
     mujoco.mj_step(model, data)
 
-    qkp1 = get_free_body_pose(model, data, handles["base_joint"])
-    qkp1[2] = wrap_angle(qkp1[2])
-    return qkp1
-
+    q_next = get_free_body_pose(model, data, handles["base_joint"])
+    q_next[2] = wrap_angle(q_next[2])
+    return q_next
 
 def add_motion_noise(q, R_motion, rng):
     qn = q.copy()
     qn = qn + rng.multivariate_normal(np.zeros(3), R_motion)
     qn[2] = wrap_angle(qn[2])
     return qn
-
 
 def mujoco_measurements(q, landmarks, Q_meas, rng,
                         fov_deg=360.0, max_range=3.0):
@@ -179,7 +162,6 @@ def mujoco_measurements(q, landmarks, Q_meas, rng,
             z[1] = wrap_angle(z[1])
             measurements.append((j, z))
     return measurements
-
 
 class EKFSLAM:
     def __init__(self, dt, n_landmarks, q0, R_motion, Q_meas, wheel_base):
@@ -210,17 +192,28 @@ class EKFSLAM:
     def lm_idx(self, j):
         return 3 + 2 * j
 
-    def predict(self, delta):
-        dx, dy, dth = delta
+    def predict(self, u_lr):
+        vl, vr = u_lr
+        x, y, th = self.mu[0, 0], self.mu[1, 0], self.mu[2, 0]
 
-        self.mu[0, 0] = self.mu[0, 0] + dx
-        self.mu[1, 0] = self.mu[1, 0] + dy
-        self.mu[2, 0] = wrap_angle(self.mu[2, 0] + dth)
+        dsl = vl * self.dt
+        dsr = vr * self.dt
+
+        ds = 0.5 * (dsr + dsl)
+        dth = (dsr - dsl) / self.wheel_base
+        th_mid = th + 0.5 * dth
+
+        self.mu[0, 0] = x + ds * np.cos(th_mid)
+        self.mu[1, 0] = y + ds * np.sin(th_mid)
+        self.mu[2, 0] = wrap_angle(th + dth)
 
         G = np.eye(self.n)
+        G[0, 2] = -ds * np.sin(th_mid)
+        G[1, 2] =  ds * np.cos(th_mid)
 
         R_full = np.zeros((self.n, self.n))
         R_full[:3, :3] = self.R
+
         self.Sigma = G @ self.Sigma @ G.T + R_full
 
     def measurement_model(self, j):
@@ -271,12 +264,15 @@ class EKFSLAM:
         I = np.eye(self.n)
         self.Sigma = (I - K @ H) @ self.Sigma @ (I - K @ H).T + K @ self.Q @ K.T
 
-    def step(self, delta, measurements):
-        self.predict(delta)
+    def step(self, u_lr, measurements):
+        self.predict(u_lr)
+
         mu_pred = self.mu.copy()
         Sigma_pred = self.Sigma.copy()
+
         for j, z in measurements:
             self.correct_one(j, z)
+
         return mu_pred, Sigma_pred
 
 
@@ -291,7 +287,6 @@ def cube_xml_from_landmarks(landmarks):
     </body>""")
     return "\n".join(parts)
 
-
 def est_landmark_xml(n_landmarks):
     return "\n".join(
         f"""
@@ -300,7 +295,6 @@ def est_landmark_xml(n_landmarks):
     </body>"""
         for j in range(n_landmarks)
     )
-
 
 def boundary_walls_xml(bounds, wall_thickness=0.06, wall_height=0.35):
     xmin, xmax, ymin, ymax = bounds
@@ -323,7 +317,6 @@ def boundary_walls_xml(bounds, wall_thickness=0.06, wall_height=0.35):
     </body>
     """
 
-
 def build_scene(template_path, out_path, landmarks, bounds):
     text = template_path.read_text(encoding="utf-8")
     if "<!-- OBSTACLES_GO_HERE -->" not in text:
@@ -338,7 +331,6 @@ def build_scene(template_path, out_path, landmarks, bounds):
         + boundary_walls_xml(bounds)
     )
     out_path.write_text(generated, encoding="utf-8")
-
 
 def setup_live_plot(landmarks, t, fov_deg=360.0, max_range=3.0):
     plt.ion()
@@ -408,7 +400,6 @@ def setup_live_plot(landmarks, t, fov_deg=360.0, max_range=3.0):
         "mu_x_ln": mu_x_ln, "mu_y_ln": mu_y_ln, "mu_th_ln": mu_th_ln,
         "sigma_ln": sigma_ln, "fov_deg": fov_deg, "max_range": max_range,
     }
-
 
 def update_live_plot(plotters, t, q_true_hist, mu_hist, mu_pred_hist,
                      sigma_trace_hist, q_gt_hist, observed_hist, landmarks, k):
@@ -511,8 +502,8 @@ def main():
     )
 
     base = Path(__file__).resolve().parent
-    template = base.parent / "models" / "TB3-WafflePi scene.xml"
-    scene = base.parent / "models" / "generated_scene.xml"
+    template = base / "models" / "TB3-WafflePi scene.xml"
+    scene = base / "models" / "generated_scene.xml"
     build_scene(template, scene, landmarks, bounds)
 
     model = mujoco.MjModel.from_xml_path(str(scene))
@@ -523,6 +514,14 @@ def main():
     data_gt = mujoco.MjData(model)
     data_true = mujoco.MjData(model)
     data_view = mujoco.MjData(model)
+
+    set_free_body_pose(model, data_gt, handles["base_joint"], q0[0], q0[1], q0[2])
+    set_free_body_pose(model, data_view, handles["base_joint"], q0[0], q0[1], q0[2])
+    set_free_body_pose(model, data_true, handles["base_joint"], q0[0], q0[1], q0[2])
+
+    mujoco.mj_forward(model, data_gt)
+    mujoco.mj_forward(model, data_view)
+    mujoco.mj_forward(model, data_true)
 
     q_gt = q0.copy()
     q_true = q0.copy()
@@ -594,17 +593,14 @@ def main():
             u_lr = compute_control(q_gt, target, landmarks, bounds, rng_ctrl, explorer_state)
 
             q_gt_prev = q_gt.copy()
-            q_gt = mujoco_motion_step(model, data_gt, handles, q_gt, u_lr)
+            q_gt = mujoco_motion_step(model, data_gt, handles, u_lr)
+            q_gt[2] = wrap_angle(q_gt[2])
 
             delta_gt = np.array([
                 q_gt[0] - q_gt_prev[0],
                 q_gt[1] - q_gt_prev[1],
                 wrap_angle(q_gt[2] - q_gt_prev[2]),
             ])   
-
-            q_gt[0] = np.clip(q_gt[0], xmin + 0.08, xmax - 0.08)
-            q_gt[1] = np.clip(q_gt[1], ymin + 0.08, ymax - 0.08)
-            q_gt[2] = wrap_angle(q_gt[2])
 
             q_true = q_gt.copy()
             q_true = add_motion_noise(q_true, R_motion, rng_noise)
@@ -617,7 +613,7 @@ def main():
                 fov_deg=fov_deg, max_range=max_range
             )
 
-            mu_pred, Sigma_pred = ekf.step(delta_gt, measurements)
+            mu_pred, Sigma_pred = ekf.step(u_lr, measurements)
 
             q_gt_hist[k + 1] = q_gt
             q_true_hist[k + 1] = q_true
