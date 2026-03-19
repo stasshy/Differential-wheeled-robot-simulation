@@ -43,7 +43,16 @@ A double-integrator system with position and velocity:
 
 - Linear dynamics  
 - Gaussian noise  
-- Standard Kalman Filter  
+- Standard Kalman Filter
+  
+State:
+x = [q, q̇]
+
+Dynamics:
+xₖ₊₁ = A xₖ + B uₖ + wₖ
+
+Measurement:
+zₖ = C xₖ + vₖ
 
 ### Result
 
@@ -55,11 +64,16 @@ A double-integrator system with position and velocity:
 
 ## EKF Localization
 
-A mobile robot with nonlinear motion:
+Motion (unicycle):
+xₖ₊₁ = xₖ + v cosθ dt  
+yₖ₊₁ = yₖ + v sinθ dt  
+θₖ₊₁ = θₖ + ω dt  
 
-- State: (x, y, θ)  
-- Motion: unicycle model  
-- Measurement: range & bearing  
+Measurement (range-bearing):
+r = √((lₓ-x)² + (l_y-y)²)  
+β = atan2(l_y-y, lₓ-x) - θ  
+
+→ Nonlinear → Extended Kalman Filter
 
 ### Results
 
@@ -78,7 +92,10 @@ A mobile robot with nonlinear motion:
 Simultaneous estimation of:
 
 - robot pose  
-- landmark positions  
+- landmark positions
+  
+State:
+μ = [x, y, θ, l₁ₓ, l₁_y, ..., lₙₓ, lₙ_y]
 
 Using nonlinear models and EKF linearization.
 
@@ -170,6 +187,8 @@ This project was developed as a robotics portfolio demonstrating:
 ## Author
 
 Αnastasia Chatziparaskeva
+
 Undergraduate Electrical Engineering Student  
 Focus: Robotics and Control 
-CONtact: 04anastasia@gmail.com 
+
+Contact: 04anastasia@gmail.com 
